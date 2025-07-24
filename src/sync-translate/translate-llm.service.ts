@@ -253,7 +253,7 @@ export class TranslateLLMService {
 - Preserve emojis, mentions, and special formatting
 - Keep slang and gaming terminology natural in the target language
 - Consider the conversational context
-- If something cannot be translated directly, provide the closest cultural equivalent
+- If something cannot be translated directly, provide the closest Wcultural equivalent
 
 **Source Language:** ${originLangName}
 **Target Language:** ${targetLangName}`;
@@ -271,7 +271,7 @@ export class TranslateLLMService {
     prompt += `
 
 **Message to Translate:**
-"${text}"
+${text}
 
 **Translation Instructions:**
 - Respond with ONLY the translated text

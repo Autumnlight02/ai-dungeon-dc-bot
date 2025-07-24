@@ -77,13 +77,14 @@ export class MessageQueue {
       }
 
       const sourceChannelName = (queuedMessage.originalMessage.channel as TextChannel).name;
-      const translatedContent = `${queuedMessage.translatedText}\n\n*from #${sourceChannelName}*`;
+      const translatedContent = queuedMessage.translatedText;
+      const usernameWithChannel = `${userProfile.displayName} [#${sourceChannelName}]`;
       
       // Try webhook first for better user impersonation
       const webhookSuccess = await WebhookService.sendWebhookMessage(
         queuedMessage.targetChannelId,
         translatedContent,
-        userProfile.displayName,
+        usernameWithChannel,
         userProfile.avatarUrl
       );
 
@@ -97,7 +98,7 @@ export class MessageQueue {
           return;
         }
 
-        const fallbackContent = `**${userProfile.displayName}** (from #${sourceChannelName}):\n${queuedMessage.translatedText}`;
+        const fallbackContent = `**${userProfile.displayName} [#${sourceChannelName}]**:\n${queuedMessage.translatedText}`;
         await targetChannel.send(fallbackContent);
       }
       
