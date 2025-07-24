@@ -27,12 +27,36 @@ export interface MessageContext {
 export class TranslateLLMService {
   private static readonly DEFAULT_MODEL = "mistral-small-latest";
   private static readonly MAX_CONTEXT_MESSAGES = 10;
-  private static readonly MAX_RETRIES = 2;
+  private static readonly MAX_RETRIES = 3; // Increased for timeout handling
   private static readonly LLM_DUMPS_DIR = "./tmp/llm-dumps";
+  private static readonly RATE_LIMIT_MS = 1000; // 1 second between translations
+  private static readonly TIMEOUT_MS = 30000; // 30 second timeout
+
+  private static lastTranslationTime = 0;
+  private static translationQueue: Promise<any> = Promise.resolve();
 
   public static async translate(
     request: LLMTranslationRequest
   ): Promise<LLMTranslationResult> {
+    // Add to queue to enforce rate limiting
+    return (this.translationQueue = this.translationQueue.then(async () => {
+      return this.executeTranslation(request);
+    }));
+  }
+
+  private static async executeTranslation(
+    request: LLMTranslationRequest
+  ): Promise<LLMTranslationResult> {
+    // Rate limiting: ensure at least 1 second between translations
+    const now = Date.now();
+    const timeSinceLastTranslation = now - this.lastTranslationTime;
+    if (timeSinceLastTranslation < this.RATE_LIMIT_MS) {
+      const waitTime = this.RATE_LIMIT_MS - timeSinceLastTranslation;
+      console.log(`Rate limiting: waiting ${waitTime}ms before translation`);
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+    }
+    this.lastTranslationTime = Date.now();
+
     this.validateRequest(request);
 
     const apiKey = process.env.MISTRAL_API_KEY;
@@ -53,9 +77,12 @@ export class TranslateLLMService {
     );
 
     // Create dump folder for this translation attempt
-    const messageId = request.contextMessages && request.contextMessages.length > 0 && request.contextMessages[0]
-      ? request.contextMessages[0].id 
-      : 'unknown';
+    const messageId =
+      request.contextMessages &&
+      request.contextMessages.length > 0 &&
+      request.contextMessages[0]
+        ? request.contextMessages[0].id
+        : "unknown";
     const dumpFolderName = `${Date.now()}_${messageId}`;
     const dumpFolderPath = `${this.LLM_DUMPS_DIR}/${dumpFolderName}`;
 
@@ -64,13 +91,21 @@ export class TranslateLLMService {
       try {
         console.log(`LLM Translation attempt ${attempt}/${this.MAX_RETRIES}`);
 
-        const result = await generateText({
+        // Create a timeout wrapper around the API call
+        const translationPromise = generateText({
           model: mistral(this.DEFAULT_MODEL),
           prompt,
           maxTokens: 1000,
           temperature: 0.3, // Lower temperature for more consistent translations
         });
 
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error(`Translation timeout after ${this.TIMEOUT_MS}ms`));
+          }, this.TIMEOUT_MS);
+        });
+
+        const result = await Promise.race([translationPromise, timeoutPromise]);
         const translatedText = this.extractTranslation(result.text);
 
         // Dump successful prompt and response
@@ -80,7 +115,7 @@ export class TranslateLLMService {
           originalText: request.text,
           translatedText,
           targetLanguage: request.targetLanguage,
-          contextUsed: contextMessages.length > 0
+          contextUsed: contextMessages.length > 0,
         });
 
         return {
@@ -92,23 +127,50 @@ export class TranslateLLMService {
         };
       } catch (error) {
         lastError = error as Error;
-        console.error(`LLM Translation attempt ${attempt} failed:`, error);
+        const errorMessage =
+          error instanceof Error ? error.message : "Unknown error";
+        const isTimeout = this.isTimeoutError(error);
+
+        console.error(
+          `LLM Translation attempt ${attempt} failed${
+            isTimeout ? " (TIMEOUT)" : ""
+          }:`,
+          errorMessage
+        );
 
         // Dump failed attempt
-        await this.dumpPromptAndResponse(dumpFolderPath, prompt, `ERROR: ${error}`, {
-          attempt,
-          success: false,
-          error: error instanceof Error ? error.message : 'Unknown error',
-          originalText: request.text,
-          targetLanguage: request.targetLanguage,
-          contextUsed: contextMessages.length > 0
-        });
+        await this.dumpPromptAndResponse(
+          dumpFolderPath,
+          prompt,
+          `ERROR: ${error}`,
+          {
+            attempt,
+            success: false,
+            error: errorMessage,
+            originalText: request.text,
+            targetLanguage: request.targetLanguage,
+            contextUsed: contextMessages.length > 0,
+          }
+        );
 
         if (attempt < this.MAX_RETRIES) {
-          // Wait before retry with exponential backoff
-          await new Promise((resolve) =>
-            setTimeout(resolve, Math.pow(2, attempt) * 1000)
-          );
+          // Calculate wait time with different strategies for different error types
+          let waitTime: number;
+          if (isTimeout) {
+            // For timeouts, use longer exponential backoff
+            waitTime = Math.pow(3, attempt) * 2000; // 6s, 18s, 54s
+            console.log(
+              `Timeout detected, waiting ${waitTime}ms before retry...`
+            );
+          } else {
+            // For other errors, use standard exponential backoff
+            waitTime = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+            console.log(
+              `API error detected, waiting ${waitTime}ms before retry...`
+            );
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
         }
       }
     }
@@ -294,6 +356,23 @@ export class TranslateLLMService {
     };
   }
 
+  private static isTimeoutError(error: unknown): boolean {
+    if (error instanceof Error) {
+      const message = error.message.toLowerCase();
+      return (
+        message.includes("timeout") ||
+        message.includes("timed out") ||
+        message.includes("request timeout") ||
+        message.includes("connection timeout") ||
+        message.includes("read timeout") ||
+        message.includes("econnreset") ||
+        message.includes("enotfound") ||
+        message.includes("etimedout")
+      );
+    }
+    return false;
+  }
+
   private static async dumpPromptAndResponse(
     dumpFolderPath: string,
     prompt: string,
@@ -323,8 +402,8 @@ Original Text: ${metadata.originalText}
 Target Language: ${metadata.targetLanguage}
 Context Used: ${metadata.contextUsed}
 Model: ${this.DEFAULT_MODEL}
-${metadata.translatedText ? `Translated Text: ${metadata.translatedText}` : ''}
-${metadata.error ? `Error: ${metadata.error}` : ''}
+${metadata.translatedText ? `Translated Text: ${metadata.translatedText}` : ""}
+${metadata.error ? `Error: ${metadata.error}` : ""}
 `;
 
       await Bun.write(`${dumpFolderPath}/prompt.txt`, promptContent);
@@ -337,8 +416,12 @@ Timestamp: ${new Date().toISOString()}
 Attempt: ${metadata.attempt}
 Success: ${metadata.success}
 Raw Response Length: ${response.length}
-${metadata.translatedText ? `Extracted Translation: ${metadata.translatedText}` : ''}
-${metadata.error ? `Error Details: ${metadata.error}` : ''}
+${
+  metadata.translatedText
+    ? `Extracted Translation: ${metadata.translatedText}`
+    : ""
+}
+${metadata.error ? `Error Details: ${metadata.error}` : ""}
 `;
 
       await Bun.write(`${dumpFolderPath}/response.txt`, responseContent);
@@ -351,14 +434,19 @@ ${metadata.error ? `Error Details: ${metadata.error}` : ''}
 
   public static async cleanupOldDumps(maxAgeHours: number = 24): Promise<void> {
     try {
-      const maxAge = Date.now() - (maxAgeHours * 60 * 60 * 1000);
-      
+      const maxAge = Date.now() - maxAgeHours * 60 * 60 * 1000;
+
       // Get all directories in LLM dumps folder
-      const result = await Bun.$`find ${this.LLM_DUMPS_DIR} -maxdepth 1 -type d -name "*_*"`.quiet();
-      const directories = result.stdout.toString().trim().split('\n').filter(dir => dir);
+      const result =
+        await Bun.$`find ${this.LLM_DUMPS_DIR} -maxdepth 1 -type d -name "*_*"`.quiet();
+      const directories = result.stdout
+        .toString()
+        .trim()
+        .split("\n")
+        .filter((dir) => dir);
 
       for (const dirPath of directories) {
-        const dirName = dirPath.split('/').pop();
+        const dirName = dirPath.split("/").pop();
         if (!dirName) continue;
 
         // Extract timestamp from directory name (format: timestamp_messageId)
@@ -372,7 +460,7 @@ ${metadata.error ? `Error Details: ${metadata.error}` : ''}
         }
       }
     } catch (error) {
-      console.error('Error during LLM dump cleanup:', error);
+      console.error("Error during LLM dump cleanup:", error);
     }
   }
 
@@ -384,12 +472,17 @@ ${metadata.error ? `Error Details: ${metadata.error}` : ''}
   }> {
     return new Promise(async (resolve) => {
       try {
-        const result = await Bun.$`find ${this.LLM_DUMPS_DIR} -maxdepth 1 -type d -name "*_*"`.quiet();
-        const directories = result.stdout.toString().trim().split('\n').filter(dir => dir);
-        
+        const result =
+          await Bun.$`find ${this.LLM_DUMPS_DIR} -maxdepth 1 -type d -name "*_*"`.quiet();
+        const directories = result.stdout
+          .toString()
+          .trim()
+          .split("\n")
+          .filter((dir) => dir);
+
         const timestamps = directories
-          .map(dir => {
-            const dirName = dir.split('/').pop();
+          .map((dir) => {
+            const dirName = dir.split("/").pop();
             const match = dirName?.match(/^(\d+)_/);
             return match && match[1] ? parseInt(match[1], 10) : null;
           })
@@ -399,23 +492,59 @@ ${metadata.error ? `Error Details: ${metadata.error}` : ''}
         // Get total size
         let totalSizeMB = 0;
         try {
-          const sizeResult = await Bun.$`du -sm "${this.LLM_DUMPS_DIR}"`.quiet();
+          const sizeResult =
+            await Bun.$`du -sm "${this.LLM_DUMPS_DIR}"`.quiet();
           const sizeMatch = sizeResult.stdout.toString().match(/^(\d+)/);
-          totalSizeMB = sizeMatch && sizeMatch[1] ? parseInt(sizeMatch[1], 10) : 0;
+          totalSizeMB =
+            sizeMatch && sizeMatch[1] ? parseInt(sizeMatch[1], 10) : 0;
         } catch (e) {
           // Size calculation failed, continue without it
         }
 
         resolve({
           totalDumps: directories.length,
-          oldestDump: timestamps.length > 0 ? new Date(timestamps[0]!).toISOString() : undefined,
-          newestDump: timestamps.length > 0 ? new Date(timestamps[timestamps.length - 1]!).toISOString() : undefined,
-          totalSizeMB
+          oldestDump:
+            timestamps.length > 0
+              ? new Date(timestamps[0]!).toISOString()
+              : undefined,
+          newestDump:
+            timestamps.length > 0
+              ? new Date(timestamps[timestamps.length - 1]!).toISOString()
+              : undefined,
+          totalSizeMB,
         });
       } catch (error) {
-        console.error('Error getting dump stats:', error);
+        console.error("Error getting dump stats:", error);
         resolve({ totalDumps: 0 });
       }
     });
+  }
+
+  public static getRateLimitInfo(): {
+    rateLimitMs: number;
+    timeSinceLastTranslation: number;
+    canTranslateNow: boolean;
+  } {
+    const now = Date.now();
+    const timeSinceLastTranslation = now - this.lastTranslationTime;
+    return {
+      rateLimitMs: this.RATE_LIMIT_MS,
+      timeSinceLastTranslation,
+      canTranslateNow: timeSinceLastTranslation >= this.RATE_LIMIT_MS,
+    };
+  }
+
+  public static getRetrySettings(): {
+    maxRetries: number;
+    timeoutMs: number;
+    standardBackoffPattern: string;
+    timeoutBackoffPattern: string;
+  } {
+    return {
+      maxRetries: this.MAX_RETRIES,
+      timeoutMs: this.TIMEOUT_MS,
+      standardBackoffPattern: "2s, 4s, 8s",
+      timeoutBackoffPattern: "6s, 18s, 54s",
+    };
   }
 }
