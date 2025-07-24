@@ -1,11 +1,19 @@
-import { Message } from 'discord.js';
+import { Message, Client } from 'discord.js';
+import { SyncMessageService } from '../sync-translate/sync-message.service';
 
 export class MessageService {
-  public handleMessage(message: Message): void {
+  private syncMessageService: SyncMessageService;
+
+  constructor(client: Client) {
+    this.syncMessageService = new SyncMessageService(client);
+  }
+
+  public async handleMessage(message: Message): Promise<void> {
     if (message.author.bot) {
       return;
     }
 
+    // Log all messages
     console.log('Message received:', {
       author: message.author.tag,
       authorId: message.author.id,
@@ -16,5 +24,12 @@ export class MessageService {
       guildId: message.guild?.id || null,
       timestamp: message.createdAt.toISOString(),
     });
+
+    // Process sync translation if applicable
+    await this.syncMessageService.handleMessage(message);
+  }
+
+  public getSyncMessageService(): SyncMessageService {
+    return this.syncMessageService;
   }
 }

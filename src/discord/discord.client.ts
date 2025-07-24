@@ -16,10 +16,10 @@ export class DiscordClient {
       ],
     });
 
-    this.messageService = new MessageService();
     this.commands = new Collection();
     this.loadCommands();
     this.setupEventListeners();
+    this.messageService = new MessageService(this.client);
   }
 
   private loadCommands(): void {
@@ -31,8 +31,12 @@ export class DiscordClient {
       console.log(`Bot is ready! Logged in as ${this.client.user?.tag}`);
     });
 
-    this.client.on('messageCreate', (message) => {
-      this.messageService.handleMessage(message);
+    this.client.on('messageCreate', async (message) => {
+      try {
+        await this.messageService.handleMessage(message);
+      } catch (error) {
+        console.error('Error handling message:', error);
+      }
     });
 
     this.client.on('interactionCreate', async (interaction) => {
