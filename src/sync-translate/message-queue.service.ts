@@ -1,6 +1,7 @@
 import { Message, TextChannel } from 'discord.js';
 import { WebhookService } from './webhook.service';
 import { UserUtils } from '../utils/user.utils';
+import { AvatarCleanupService } from './avatar-cleanup.service';
 
 export interface QueuedMessage {
   id: string;
@@ -101,8 +102,19 @@ export class MessageQueue {
       }
       
       console.log(`Translated message sent to channel ${queuedMessage.targetChannelId} as ${userProfile.displayName}`);
+      
+      // Remove reference count for profile picture cleanup
+      if (userProfile.profilePicturePath) {
+        await AvatarCleanupService.removeReference(userProfile.profilePicturePath);
+      }
     } catch (error) {
       console.error(`Error sending translated message:`, error);
+      
+      // Still remove reference even if message sending failed
+      if (queuedMessage.userProfile?.profilePicturePath) {
+        await AvatarCleanupService.removeReference(queuedMessage.userProfile.profilePicturePath);
+      }
+      
       throw error;
     }
   }

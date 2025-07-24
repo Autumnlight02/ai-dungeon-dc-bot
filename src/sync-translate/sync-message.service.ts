@@ -1,12 +1,14 @@
-import { Message, Client } from "discord.js";
+import { Message, Client, TextChannel } from "discord.js";
 import {
   SyncStorageService,
   type ChannelLanguageConfig,
 } from "./sync-storage.service";
 import { TranslationService } from "./translate.service";
+import { TranslateLLMService } from "./translate-llm.service";
 import { MessageQueueManager } from "./message-queue.service";
 import { UserUtils } from "../utils/user.utils";
 import { WebhookService } from "./webhook.service";
+import { AvatarCleanupService } from "./avatar-cleanup.service";
 
 export class SyncMessageService {
   private client: Client;
@@ -87,6 +89,18 @@ export class SyncMessageService {
         displayName: message.author.displayName || message.author.username,
         avatarUrl: message.author.displayAvatarURL({ size: 256 })
       };
+    }
+
+    // Add reference count for the profile picture based on how many target channels we have
+    const totalTargetChannels = syncGroups.reduce((count, group) => {
+      return count + group.channels.filter(c => c.channelId !== sourceChannelId).length;
+    }, 0);
+
+    if (userProfile.profilePicturePath && totalTargetChannels > 0) {
+      // Add reference count for each target channel that will use this avatar
+      for (let i = 0; i < totalTargetChannels; i++) {
+        AvatarCleanupService.addReference(userProfile.profilePicturePath);
+      }
     }
 
     // Process each sync group
@@ -191,41 +205,91 @@ export class SyncMessageService {
       return;
     }
 
-    try {
-      const translationService = new TranslationService();
+    let translatedText = "";
+    let translationMethod = "unknown";
 
-      const translationResult = await translationService.translate({
+    try {
+      // First, try LLM translation with context
+      translatedText = await this.tryLLMTranslation(
+        message,
+        sourceLanguage,
+        targetLanguage
+      );
+      translationMethod = "LLM (Mistral)";
+      
+      console.log(
+        `LLM Translated "${message.content}" from ${sourceLanguage} to ${targetLanguage}: "${translatedText}"`
+      );
+    } catch (llmError) {
+      console.warn(`LLM translation failed, falling back to Google Translate:`, llmError);
+      
+      try {
+        // Fallback to Google Translate
+        const translationService = new TranslationService();
+        const translationResult = await translationService.translate({
+          text: message.content,
+          targetLanguage: targetLanguage,
+          originLanguage: sourceLanguage,
+        });
+        
+        translatedText = translationResult.translatedText;
+        translationMethod = "Google Translate";
+        
+        console.log(
+          `Google Translate fallback: "${message.content}" from ${sourceLanguage} to ${targetLanguage}: "${translatedText}"`
+        );
+      } catch (googleError) {
+        console.error(
+          `Both LLM and Google translation failed for message "${message.content}" to ${targetLanguage}:`,
+          { llmError, googleError }
+        );
+
+        // Queue the original message with an error indicator
+        await MessageQueueManager.addToQueue(
+          targetChannelId,
+          message,
+          targetLanguage,
+          `[Translation Error] ${message.content}`,
+          userProfile
+        );
+        return;
+      }
+    }
+
+    // Add successful translation to message queue
+    await MessageQueueManager.addToQueue(
+      targetChannelId,
+      message,
+      targetLanguage,
+      `${translatedText}${translationMethod === "Google Translate" ? " 🔄" : ""}`, // Add indicator for fallback
+      userProfile
+    );
+  }
+
+  private async tryLLMTranslation(
+    message: Message,
+    sourceLanguage: string,
+    targetLanguage: string
+  ): Promise<string> {
+    try {
+      // Fetch recent messages for context
+      const channel = message.channel as TextChannel;
+      const recentMessages = await TranslateLLMService.fetchRecentMessages(channel, 10);
+      
+      // Filter out the current message to avoid including it in context
+      const contextMessages = recentMessages.filter(msg => msg.id !== message.id);
+      
+      const llmResult = await TranslateLLMService.translate({
         text: message.content,
         targetLanguage: targetLanguage,
         originLanguage: sourceLanguage,
+        contextMessages: contextMessages
       });
 
-      console.log(
-        `Translated "${message.content}" from ${sourceLanguage} to ${targetLanguage}: "${translationResult.translatedText}"`
-      );
-
-      // Add to message queue for ordered delivery with user profile
-      await MessageQueueManager.addToQueue(
-        targetChannelId,
-        message,
-        targetLanguage,
-        translationResult.translatedText,
-        userProfile
-      );
+      return llmResult.translatedText;
     } catch (error) {
-      console.error(
-        `Translation failed for message "${message.content}" to ${targetLanguage}:`,
-        error
-      );
-
-      // Optionally, queue the original message with an error indicator
-      await MessageQueueManager.addToQueue(
-        targetChannelId,
-        message,
-        targetLanguage,
-        `[Translation Error] ${message.content}`,
-        userProfile
-      );
+      console.error('LLM translation failed:', error);
+      throw error;
     }
   }
 
@@ -259,5 +323,43 @@ export class SyncMessageService {
 
   public getQueueStats() {
     return MessageQueueManager.getQueueStats();
+  }
+
+  public getTranslationServiceInfo() {
+    return {
+      primary: TranslateLLMService.getModelInfo(),
+      fallback: {
+        provider: "Google Translate",
+        model: "translate_a/single"
+      }
+    };
+  }
+
+  public async testLLMTranslation(text: string, targetLanguage: string, originLanguage?: string): Promise<{
+    success: boolean;
+    result?: string;
+    error?: string;
+    method: string;
+  }> {
+    try {
+      const llmResult = await TranslateLLMService.translate({
+        text,
+        targetLanguage,
+        originLanguage,
+        contextMessages: []
+      });
+      
+      return {
+        success: true,
+        result: llmResult.translatedText,
+        method: `LLM (${llmResult.model})`
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        method: 'LLM (failed)'
+      };
+    }
   }
 }

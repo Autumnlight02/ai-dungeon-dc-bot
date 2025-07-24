@@ -161,6 +161,27 @@ export class UserUtils {
     }
   }
 
+  public static async deleteProfilePicture(filePath: string): Promise<boolean> {
+    try {
+      if (!filePath) {
+        return false;
+      }
+
+      const fileExists = await Bun.file(filePath).exists();
+      if (!fileExists) {
+        console.log(`Profile picture file does not exist: ${filePath}`);
+        return false;
+      }
+
+      await this.deleteFile(filePath);
+      console.log(`Deleted profile picture: ${filePath}`);
+      return true;
+    } catch (error) {
+      console.error(`Failed to delete profile picture ${filePath}:`, error);
+      return false;
+    }
+  }
+
   public static isValidImageFormat(filename: string): boolean {
     const ext = extname(filename).toLowerCase();
     return this.SUPPORTED_IMAGE_FORMATS.includes(ext);
