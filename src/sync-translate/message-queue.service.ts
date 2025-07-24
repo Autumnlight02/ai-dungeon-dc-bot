@@ -1,4 +1,6 @@
 import { Message, TextChannel } from 'discord.js';
+import { WebhookService } from './webhook.service';
+import { UserUtils } from '../utils/user.utils';
 
 export interface QueuedMessage {
   id: string;
@@ -7,6 +9,12 @@ export interface QueuedMessage {
   targetLanguage: string;
   translatedText?: string;
   timestamp: number;
+  userProfile?: {
+    username: string;
+    displayName: string;
+    avatarUrl?: string;
+    profilePicturePath?: string;
+  };
 }
 
 export class MessageQueue {
@@ -45,21 +53,54 @@ export class MessageQueue {
 
   private async sendTranslatedMessage(queuedMessage: QueuedMessage): Promise<void> {
     try {
-      const targetChannel = await queuedMessage.originalMessage.client.channels.fetch(queuedMessage.targetChannelId) as TextChannel;
-      
-      if (!targetChannel || !targetChannel.isTextBased()) {
-        console.error(`Target channel ${queuedMessage.targetChannelId} is not a text channel`);
-        return;
+      // Extract user profile if not already cached
+      let userProfile = queuedMessage.userProfile;
+      if (!userProfile) {
+        try {
+          const userResult = await UserUtils.extractUserLikeByMessage(queuedMessage.originalMessage);
+          userProfile = {
+            username: userResult.user.username,
+            displayName: userResult.user.displayName,
+            avatarUrl: userResult.user.avatarUrl,
+            profilePicturePath: userResult.profilePicturePath
+          };
+        } catch (error) {
+          console.warn('Failed to extract user profile, using fallback:', error);
+          const author = queuedMessage.originalMessage.author;
+          userProfile = {
+            username: author.username,
+            displayName: author.displayName || author.username,
+            avatarUrl: author.displayAvatarURL({ size: 256 })
+          };
+        }
       }
 
-      const author = queuedMessage.originalMessage.author;
       const sourceChannelName = (queuedMessage.originalMessage.channel as TextChannel).name;
+      const translatedContent = `${queuedMessage.translatedText}\n\n*from #${sourceChannelName}*`;
       
-      const translatedContent = `**${author.displayName}** (from #${sourceChannelName}):\n${queuedMessage.translatedText}`;
+      // Try webhook first for better user impersonation
+      const webhookSuccess = await WebhookService.sendWebhookMessage(
+        queuedMessage.targetChannelId,
+        translatedContent,
+        userProfile.displayName,
+        userProfile.avatarUrl
+      );
+
+      if (!webhookSuccess) {
+        // Fallback to regular bot message
+        console.log('Webhook failed, falling back to regular message');
+        const targetChannel = await queuedMessage.originalMessage.client.channels.fetch(queuedMessage.targetChannelId) as TextChannel;
+        
+        if (!targetChannel || !targetChannel.isTextBased()) {
+          console.error(`Target channel ${queuedMessage.targetChannelId} is not a text channel`);
+          return;
+        }
+
+        const fallbackContent = `**${userProfile.displayName}** (from #${sourceChannelName}):\n${queuedMessage.translatedText}`;
+        await targetChannel.send(fallbackContent);
+      }
       
-      await targetChannel.send(translatedContent);
-      
-      console.log(`Translated message sent to channel ${queuedMessage.targetChannelId}`);
+      console.log(`Translated message sent to channel ${queuedMessage.targetChannelId} as ${userProfile.displayName}`);
     } catch (error) {
       console.error(`Error sending translated message:`, error);
       throw error;
@@ -89,7 +130,13 @@ export class MessageQueueManager {
     targetChannelId: string,
     originalMessage: Message,
     targetLanguage: string,
-    translatedText: string
+    translatedText: string,
+    userProfile?: {
+      username: string;
+      displayName: string;
+      avatarUrl?: string;
+      profilePicturePath?: string;
+    }
   ): Promise<void> {
     const queue = this.getOrCreateQueue(targetChannelId);
     
@@ -99,7 +146,8 @@ export class MessageQueueManager {
       targetChannelId,
       targetLanguage,
       translatedText,
-      timestamp: originalMessage.createdTimestamp
+      timestamp: originalMessage.createdTimestamp,
+      userProfile
     };
 
     await queue.addMessage(queuedMessage);

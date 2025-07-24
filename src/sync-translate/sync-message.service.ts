@@ -5,13 +5,16 @@ import {
 } from "./sync-storage.service";
 import { TranslationService } from "./translate.service";
 import { MessageQueueManager } from "./message-queue.service";
-import { LanguageService } from "./languages";
+import { UserUtils } from "../utils/user.utils";
+import { WebhookService } from "./webhook.service";
 
 export class SyncMessageService {
   private client: Client;
 
   constructor(client: Client) {
     this.client = client;
+    // Initialize webhook service with client
+    WebhookService.setClient(client);
   }
 
   public async handleMessage(message: Message): Promise<void> {
@@ -66,13 +69,34 @@ export class SyncMessageService {
       `Processing message from ${message.author.tag} in synced channel ${sourceChannelId}`
     );
 
+    // Extract user profile once for all translations
+    let userProfile;
+    try {
+      const userResult = await UserUtils.extractUserLikeByMessage(message);
+      userProfile = {
+        username: userResult.user.username,
+        displayName: userResult.user.displayName,
+        avatarUrl: userResult.user.avatarUrl,
+        profilePicturePath: userResult.profilePicturePath
+      };
+      console.log(`Extracted user profile for ${userProfile.displayName}`);
+    } catch (error) {
+      console.warn('Failed to extract user profile, using fallback:', error);
+      userProfile = {
+        username: message.author.username,
+        displayName: message.author.displayName || message.author.username,
+        avatarUrl: message.author.displayAvatarURL({ size: 256 })
+      };
+    }
+
     // Process each sync group
     for (const { groupId, channels } of syncGroups) {
       await this.translateToSyncGroup(
         message,
         sourceLanguage,
         groupId,
-        channels
+        channels,
+        userProfile
       );
     }
   }
@@ -109,7 +133,13 @@ export class SyncMessageService {
     message: Message,
     sourceLanguage: string,
     groupId: string,
-    channels: ChannelLanguageConfig[]
+    channels: ChannelLanguageConfig[],
+    userProfile: {
+      username: string;
+      displayName: string;
+      avatarUrl?: string;
+      profilePicturePath?: string;
+    }
   ): Promise<void> {
     const sourceChannelId = message.channel.id;
 
@@ -129,7 +159,7 @@ export class SyncMessageService {
     // Translate to each target language
     for (const targetChannel of targetChannels) {
       try {
-        await this.translateAndQueue(message, sourceLanguage, targetChannel);
+        await this.translateAndQueue(message, sourceLanguage, targetChannel, userProfile);
       } catch (error) {
         console.error(
           `Failed to translate message for channel ${targetChannel.channelId}:`,
@@ -142,7 +172,13 @@ export class SyncMessageService {
   private async translateAndQueue(
     message: Message,
     sourceLanguage: string,
-    targetChannel: ChannelLanguageConfig
+    targetChannel: ChannelLanguageConfig,
+    userProfile: {
+      username: string;
+      displayName: string;
+      avatarUrl?: string;
+      profilePicturePath?: string;
+    }
   ): Promise<void> {
     const { channelId: targetChannelId, language: targetLanguage } =
       targetChannel;
@@ -168,12 +204,13 @@ export class SyncMessageService {
         `Translated "${message.content}" from ${sourceLanguage} to ${targetLanguage}: "${translationResult.translatedText}"`
       );
 
-      // Add to message queue for ordered delivery
+      // Add to message queue for ordered delivery with user profile
       await MessageQueueManager.addToQueue(
         targetChannelId,
         message,
         targetLanguage,
-        translationResult.translatedText
+        translationResult.translatedText,
+        userProfile
       );
     } catch (error) {
       console.error(
@@ -186,7 +223,8 @@ export class SyncMessageService {
         targetChannelId,
         message,
         targetLanguage,
-        `[Translation Error] ${message.content}`
+        `[Translation Error] ${message.content}`,
+        userProfile
       );
     }
   }
