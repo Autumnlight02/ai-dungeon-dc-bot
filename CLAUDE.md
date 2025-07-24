@@ -18,6 +18,7 @@ This is a Discord bot project designed for AI Dungeon functionality. The bot is 
 - `index.ts` - Main bot entry point and initialization
 - `src/discord/discord.client.ts` - Discord client setup and event handling
 - `src/messages/message.service.ts` - Message processing and logging service
+- `src/sync-translate/` - Translation functionality including slash commands and translation service
 - `package.json` - Project dependencies and configuration
 - `tsconfig.json` - TypeScript configuration
 - `README.md` - Basic project documentation
