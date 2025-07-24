@@ -28,6 +28,7 @@ export class TranslateLLMService {
   private static readonly DEFAULT_MODEL = "mistral-small-latest";
   private static readonly MAX_CONTEXT_MESSAGES = 10;
   private static readonly MAX_RETRIES = 2;
+  private static readonly LLM_DUMPS_DIR = "./tmp/llm-dumps";
 
   public static async translate(
     request: LLMTranslationRequest
@@ -51,6 +52,13 @@ export class TranslateLLMService {
       contextMessages
     );
 
+    // Create dump folder for this translation attempt
+    const messageId = request.contextMessages && request.contextMessages.length > 0 && request.contextMessages[0]
+      ? request.contextMessages[0].id 
+      : 'unknown';
+    const dumpFolderName = `${Date.now()}_${messageId}`;
+    const dumpFolderPath = `${this.LLM_DUMPS_DIR}/${dumpFolderName}`;
+
     let lastError: Error | null = null;
     for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
       try {
@@ -65,6 +73,16 @@ export class TranslateLLMService {
 
         const translatedText = this.extractTranslation(result.text);
 
+        // Dump successful prompt and response
+        await this.dumpPromptAndResponse(dumpFolderPath, prompt, result.text, {
+          attempt,
+          success: true,
+          originalText: request.text,
+          translatedText,
+          targetLanguage: request.targetLanguage,
+          contextUsed: contextMessages.length > 0
+        });
+
         return {
           originalText: request.text,
           translatedText,
@@ -75,6 +93,16 @@ export class TranslateLLMService {
       } catch (error) {
         lastError = error as Error;
         console.error(`LLM Translation attempt ${attempt} failed:`, error);
+
+        // Dump failed attempt
+        await this.dumpPromptAndResponse(dumpFolderPath, prompt, `ERROR: ${error}`, {
+          attempt,
+          success: false,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          originalText: request.text,
+          targetLanguage: request.targetLanguage,
+          contextUsed: contextMessages.length > 0
+        });
 
         if (attempt < this.MAX_RETRIES) {
           // Wait before retry with exponential backoff
@@ -264,5 +292,130 @@ export class TranslateLLMService {
       model: this.DEFAULT_MODEL,
       provider: "Mistral",
     };
+  }
+
+  private static async dumpPromptAndResponse(
+    dumpFolderPath: string,
+    prompt: string,
+    response: string,
+    metadata: {
+      attempt: number;
+      success: boolean;
+      originalText: string;
+      translatedText?: string;
+      targetLanguage: string;
+      contextUsed: boolean;
+      error?: string;
+    }
+  ): Promise<void> {
+    try {
+      // Create dump directory
+      await Bun.$`mkdir -p ${dumpFolderPath}`;
+
+      // Create prompt file
+      const promptContent = `${prompt}
+
+=== METADATA ===
+Timestamp: ${new Date().toISOString()}
+Attempt: ${metadata.attempt}
+Success: ${metadata.success}
+Original Text: ${metadata.originalText}
+Target Language: ${metadata.targetLanguage}
+Context Used: ${metadata.contextUsed}
+Model: ${this.DEFAULT_MODEL}
+${metadata.translatedText ? `Translated Text: ${metadata.translatedText}` : ''}
+${metadata.error ? `Error: ${metadata.error}` : ''}
+`;
+
+      await Bun.write(`${dumpFolderPath}/prompt.txt`, promptContent);
+
+      // Create response file
+      const responseContent = `${response}
+
+=== METADATA ===
+Timestamp: ${new Date().toISOString()}
+Attempt: ${metadata.attempt}
+Success: ${metadata.success}
+Raw Response Length: ${response.length}
+${metadata.translatedText ? `Extracted Translation: ${metadata.translatedText}` : ''}
+${metadata.error ? `Error Details: ${metadata.error}` : ''}
+`;
+
+      await Bun.write(`${dumpFolderPath}/response.txt`, responseContent);
+
+      console.log(`LLM dump saved to: ${dumpFolderPath}`);
+    } catch (error) {
+      console.warn(`Failed to dump LLM prompt/response:`, error);
+    }
+  }
+
+  public static async cleanupOldDumps(maxAgeHours: number = 24): Promise<void> {
+    try {
+      const maxAge = Date.now() - (maxAgeHours * 60 * 60 * 1000);
+      
+      // Get all directories in LLM dumps folder
+      const result = await Bun.$`find ${this.LLM_DUMPS_DIR} -maxdepth 1 -type d -name "*_*"`.quiet();
+      const directories = result.stdout.toString().trim().split('\n').filter(dir => dir);
+
+      for (const dirPath of directories) {
+        const dirName = dirPath.split('/').pop();
+        if (!dirName) continue;
+
+        // Extract timestamp from directory name (format: timestamp_messageId)
+        const timestampMatch = dirName.match(/^(\d+)_/);
+        if (timestampMatch && timestampMatch[1]) {
+          const timestamp = parseInt(timestampMatch[1], 10);
+          if (timestamp < maxAge) {
+            await Bun.$`rm -rf "${dirPath}"`;
+            console.log(`Cleaned up old LLM dump: ${dirPath}`);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error during LLM dump cleanup:', error);
+    }
+  }
+
+  public static getDumpStats(): Promise<{
+    totalDumps: number;
+    oldestDump?: string;
+    newestDump?: string;
+    totalSizeMB?: number;
+  }> {
+    return new Promise(async (resolve) => {
+      try {
+        const result = await Bun.$`find ${this.LLM_DUMPS_DIR} -maxdepth 1 -type d -name "*_*"`.quiet();
+        const directories = result.stdout.toString().trim().split('\n').filter(dir => dir);
+        
+        const timestamps = directories
+          .map(dir => {
+            const dirName = dir.split('/').pop();
+            const match = dirName?.match(/^(\d+)_/);
+            return match && match[1] ? parseInt(match[1], 10) : null;
+          })
+          .filter((timestamp): timestamp is number => timestamp !== null)
+          .sort((a, b) => a - b);
+
+        // Get total size
+        let totalSizeMB = 0;
+        try {
+          const sizeResult = await Bun.$`du -sm "${this.LLM_DUMPS_DIR}"`.quiet();
+          const sizeMatch = sizeResult.stdout.toString().match(/^(\d+)/);
+          totalSizeMB = sizeMatch && sizeMatch[1] ? parseInt(sizeMatch[1], 10) : 0;
+        } catch (e) {
+          // Size calculation failed, continue without it
+        }
+
+        resolve({
+          totalDumps: directories.length,
+          oldestDump: timestamps.length > 0 ? new Date(timestamps[0]!).toISOString() : undefined,
+          newestDump: timestamps.length > 0 ? new Date(timestamps[timestamps.length - 1]!).toISOString() : undefined,
+          totalSizeMB
+        });
+      } catch (error) {
+        console.error('Error getting dump stats:', error);
+        resolve({ totalDumps: 0 });
+      }
+    });
   }
 }

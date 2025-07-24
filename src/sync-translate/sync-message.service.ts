@@ -283,7 +283,7 @@ export class SyncMessageService {
         text: message.content,
         targetLanguage: targetLanguage,
         originLanguage: sourceLanguage,
-        contextMessages: contextMessages
+        contextMessages: [message, ...contextMessages] // Include current message for ID extraction
       });
 
       return llmResult.translatedText;
