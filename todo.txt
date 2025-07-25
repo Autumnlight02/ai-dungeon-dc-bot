@@ -1,1 +1,22 @@
 Add message refs
+
+https://www.npmjs.com/package/@blocknote/core
+https://github.com/yoopta-editor/Yoopta-Editor?utm_source=chatgpt.com
+https://tiptap.dev/product/editor?utm_source=chatgpt.com
+https://github.com/masnormen/noshon?utm_source=chatgpt.com
+https://lexical.dev/docs/getting-started/react?utm_source=chatgpt.com
+https://playground.lexical.dev/
+https://medevel.com/notion-style-editors-21991/?utm_source=chatgpt.com
+https://www.npmjs.com/package/react-simple-code-editor?utm_source=chatgpt.com
+https://www.npmjs.com/package/prism-react-renderer?utm_source=chatgpt.com#theming
+https://www.npmjs.com/package/prism-react-renderer?utm_source=chatgpt.com#theming
+https://github.com/PrismJS/prism-themes
+
+https://github.com/molefrog/wouter?utm_source=chatgpt.com
+https://tanstack.com/router/latest/docs/framework/react/guide/outlets
+
+https://go.outseta.com/support/kb/articles/aWxXddWV/javascript-configuration-guide
+
+https://grafana.com/blog/2025/07/08/observability-in-under-5-seconds-reflecting-on-a-year-of-grafana/otel-lgtm/?utm_source=chatgpt.com
+https://github.com/Unleash/unleash?utm_source=chatgpt.com
+https://docs.getunleash.io/reference/sdks
