@@ -67,9 +67,18 @@ export class SyncMessageService {
       return;
     }
 
+    // Debug emoji content before translation
+    const customEmojiRegex = /<(a?):(\w+):(\d+)>/g;
+    const foundEmojis = message.content.match(customEmojiRegex);
+    
     console.log(
       `Processing message from ${message.author.tag} in synced channel ${sourceChannelId}`
     );
+    console.log('Content to translate:', {
+      content: message.content,
+      rawContent: JSON.stringify(message.content),
+      foundEmojis: foundEmojis
+    });
 
     // Extract user profile once for all translations
     let userProfile;

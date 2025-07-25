@@ -64,13 +64,18 @@ export class TranslateLLMService {
       throw new Error("MISTRAL_API_KEY environment variable is required");
     }
 
+    // Protect Discord syntax before translation
+    const { protectedText, replacements } = this.protectDiscordSyntax(
+      request.text
+    );
+
     // Get recent message context if available
     const contextMessages = request.contextMessages
       ? await this.getMessageContext(request.contextMessages)
       : [];
 
     const prompt = this.buildTranslationPrompt(
-      request.text,
+      protectedText,
       request.targetLanguage,
       request.originLanguage,
       contextMessages
@@ -106,7 +111,13 @@ export class TranslateLLMService {
         });
 
         const result = await Promise.race([translationPromise, timeoutPromise]);
-        const translatedText = this.extractTranslation(result.text);
+        let translatedText = this.extractTranslation(result.text);
+
+        // Restore Discord syntax in the translation
+        translatedText = this.restoreDiscordSyntax(
+          translatedText,
+          replacements
+        );
 
         // Dump successful prompt and response
         await this.dumpPromptAndResponse(dumpFolderPath, prompt, result.text, {
@@ -180,6 +191,63 @@ export class TranslateLLMService {
     );
   }
 
+  private static protectDiscordSyntax(text: string): {
+    protectedText: string;
+    replacements: Map<string, string>;
+  } {
+    const replacements = new Map<string, string>();
+    let protectedText = text;
+    let counter = 0;
+
+    // Protect custom emojis: <:name:id> and <a:name:id>
+    const emojiRegex = /<a?:[^:]+:\d+>/g;
+    protectedText = protectedText.replace(emojiRegex, (match) => {
+      const placeholder = `__DISCORD_EMOJI_${counter++}__`;
+      replacements.set(placeholder, match);
+      return placeholder;
+    });
+
+    // Protect user mentions: <@userid> and <@!userid>
+    const userMentionRegex = /<@!?\d+>/g;
+    protectedText = protectedText.replace(userMentionRegex, (match) => {
+      const placeholder = `__DISCORD_USER_${counter++}__`;
+      replacements.set(placeholder, match);
+      return placeholder;
+    });
+
+    // Protect role mentions: <@&roleid>
+    const roleMentionRegex = /<@&\d+>/g;
+    protectedText = protectedText.replace(roleMentionRegex, (match) => {
+      const placeholder = `__DISCORD_ROLE_${counter++}__`;
+      replacements.set(placeholder, match);
+      return placeholder;
+    });
+
+    // Protect channel mentions: <#channelid>
+    const channelMentionRegex = /<#\d+>/g;
+    protectedText = protectedText.replace(channelMentionRegex, (match) => {
+      const placeholder = `__DISCORD_CHANNEL_${counter++}__`;
+      replacements.set(placeholder, match);
+      return placeholder;
+    });
+
+    return { protectedText, replacements };
+  }
+
+  private static restoreDiscordSyntax(
+    text: string,
+    replacements: Map<string, string>
+  ): string {
+    let restoredText = text;
+    for (const [placeholder, original] of replacements) {
+      restoredText = restoredText.replace(
+        new RegExp(placeholder, "g"),
+        original
+      );
+    }
+    return restoredText;
+  }
+
   private static validateRequest(request: LLMTranslationRequest): void {
     if (!request.text || typeof request.text !== "string") {
       throw new Error("Text is required and must be a non-empty string");
@@ -250,10 +318,10 @@ export class TranslateLLMService {
 
 **Translation Guidelines:**
 - Maintain the original tone (casual, formal, excited, etc.)
-- Preserve emojis, mentions, and special formatting
+- Preserve ALL emojis, mentions, and special formatting EXACTLY as they appear
 - Keep slang and gaming terminology natural in the target language
 - Consider the conversational context
-- If something cannot be translated directly, provide the closest Wcultural equivalent
+- If something cannot be translated directly, provide the closest cultural equivalent
 
 **Source Language:** ${originLangName}
 **Target Language:** ${targetLangName}`;
@@ -278,7 +346,9 @@ ${text}
 - Do not include explanations, notes, or commentary
 - Do not repeat the original text
 - Ensure the translation flows naturally in ${targetLangName}
-- Preseve emoji syntax if you detect it.
+- CRITICAL: Preserve Discord custom emojis EXACTLY (format: <:name:id> or <a:name:id>)
+- CRITICAL: Preserve user mentions EXACTLY (format: <@userid> or <@&roleid>)
+- CRITICAL: Keep all special Discord formatting intact
 
 **Translation:**`;
 

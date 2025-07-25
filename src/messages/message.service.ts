@@ -26,11 +26,16 @@ export class MessageService {
     // Check for voice messages first
     const isVoiceMessage = this.speechToTextService?.isVoiceMessage(message) || false;
 
-    // Log all messages
+    // Log all messages with emoji debugging
+    const customEmojiRegex = /<(a?):(\w+):(\d+)>/g;
+    const foundEmojis = message.content.match(customEmojiRegex);
+    
     console.log('Message received:', {
       author: message.author.tag,
       authorId: message.author.id,
       content: message.content,
+      rawContent: JSON.stringify(message.content),
+      foundCustomEmojis: foundEmojis,
       channel: message.channel.id,
       channelName: message.channel.type === 0 ? message.channel.name : 'DM',
       guild: message.guild?.name || 'DM',

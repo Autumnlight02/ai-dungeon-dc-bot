@@ -1,6 +1,7 @@
 import { Client, GatewayIntentBits, Collection, REST, Routes } from 'discord.js';
 import { MessageService } from '../messages/message.service';
 import { syncLanguageCommand } from '../sync-translate/sync-language.command';
+import { EmojiSyncService } from '../sync-translate/emoji-sync.service';
 
 export class DiscordClient {
   private client: Client;
@@ -59,6 +60,25 @@ export class DiscordClient {
           await interaction.reply({ content: 'There was an error while executing this command!', ephemeral: true });
         }
       }
+    });
+
+    // Cleanup temporary emojis on disconnect/shutdown
+    this.client.on('disconnect', async () => {
+      console.log('Bot disconnected, cleaning up temporary emojis...');
+      await EmojiSyncService.cleanupAllTemporaryEmojis();
+    });
+
+    // Also handle process termination
+    process.on('SIGINT', async () => {
+      console.log('Bot shutting down (SIGINT), cleaning up temporary emojis...');
+      await EmojiSyncService.cleanupAllTemporaryEmojis();
+      process.exit(0);
+    });
+
+    process.on('SIGTERM', async () => {
+      console.log('Bot shutting down (SIGTERM), cleaning up temporary emojis...');
+      await EmojiSyncService.cleanupAllTemporaryEmojis();
+      process.exit(0);
     });
   }
 
