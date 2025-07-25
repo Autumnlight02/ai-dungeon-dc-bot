@@ -1,3 +1,6 @@
+WARNING! THIS IS AI GENERATED SLOP. USE AT YOUR OWN RISK!
+
+
 # ai-dungeon-dc-bot
 
 To install dependencies:
